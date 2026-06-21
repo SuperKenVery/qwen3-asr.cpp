@@ -20,6 +20,7 @@ struct cli_params {
     std::string align_text = "";
     int32_t max_tokens = 1024;
     int32_t n_threads = 4;
+    float chunk_seconds = 30.0f;
     bool print_progress = false;
     bool print_timing = true;
     bool print_tokens = false;
@@ -38,6 +39,7 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  -l, --language <code>  Language code (optional, e.g. 'korean' for Korean word splitting)\n");
     fprintf(stderr, "  -t, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  --max-tokens <n>       Maximum tokens to generate (default: 1024)\n");
+    fprintf(stderr, "  --chunk-seconds <sec>  Long-audio chunk size, <=0 disables (default: 30)\n");
     fprintf(stderr, "  --progress             Print progress during transcription\n");
     fprintf(stderr, "  --no-timing            Don't print timing information\n");
     fprintf(stderr, "  --tokens               Print token IDs\n");
@@ -104,6 +106,12 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
                 return false;
             }
             params.max_tokens = std::atoi(argv[++i]);
+        } else if (strcmp(arg, "--chunk-seconds") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg);
+                return false;
+            }
+            params.chunk_seconds = std::atof(argv[++i]);
         } else if (strcmp(arg, "--progress") == 0) {
             params.print_progress = true;
         } else if (strcmp(arg, "--no-timing") == 0) {
@@ -376,6 +384,7 @@ static int run_transcription(const cli_params & params) {
     tp.max_tokens = params.max_tokens;
     tp.language = params.language;
     tp.n_threads = params.n_threads;
+    tp.chunk_seconds = params.chunk_seconds;
     tp.print_progress = params.print_progress;
     tp.print_timing = params.print_timing;
     
@@ -432,6 +441,7 @@ static int run_transcribe_and_align(const cli_params & params) {
     tp.max_tokens = params.max_tokens;
     tp.language = params.language;
     tp.n_threads = params.n_threads;
+    tp.chunk_seconds = params.chunk_seconds;
     tp.print_progress = params.print_progress;
     tp.print_timing = params.print_timing;
 

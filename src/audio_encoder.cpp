@@ -21,6 +21,31 @@ static void compute_sinusoidal_pe(float * pe, int n_ctx, int d_model) {
     }
 }
 
+static void add_positional_embedding(const audio_encoder_model & model,
+                                     std::vector<float> & data,
+                                     int64_t n_ctx,
+                                     int64_t n_state) {
+    if (model.pos_embd_w &&
+        model.pos_embd_w->type == GGML_TYPE_F32 &&
+        model.pos_embd_w->ne[0] == n_state &&
+        model.pos_embd_w->ne[1] >= n_ctx &&
+        model.pos_embd_w->data) {
+        const float * pos = static_cast<const float *>(model.pos_embd_w->data);
+        for (int64_t t = 0; t < n_ctx; ++t) {
+            for (int64_t i = 0; i < n_state; ++i) {
+                data[t * n_state + i] += pos[t * n_state + i];
+            }
+        }
+        return;
+    }
+
+    std::vector<float> pe(n_ctx * n_state);
+    compute_sinusoidal_pe(pe.data(), n_ctx, n_state);
+    for (int64_t i = 0; i < n_ctx * n_state; ++i) {
+        data[i] += pe[i];
+    }
+}
+
 AudioEncoder::AudioEncoder() = default;
 
 AudioEncoder::~AudioEncoder() {
@@ -309,6 +334,23 @@ static int compute_chunk_output_length(int chunk_len) {
     return len;
 }
 
+static std::vector<float> build_window_attention_mask(int32_t n_ctx, int32_t window_size) {
+    if (window_size <= 0) {
+        window_size = n_ctx;
+    }
+
+    std::vector<float> mask((size_t)n_ctx * n_ctx, -INFINITY);
+    for (int32_t start = 0; start < n_ctx; start += window_size) {
+        int32_t end = std::min(start + window_size, n_ctx);
+        for (int32_t r = start; r < end; ++r) {
+            for (int32_t c = start; c < end; ++c) {
+                mask[(size_t)r * n_ctx + c] = 0.0f;
+            }
+        }
+    }
+    return mask;
+}
+
 bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames, 
                           std::vector<float> & output) {
     QWEN3_TIMER("audio_encoding.total");
@@ -397,11 +439,7 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
         std::vector<float> chunk_output(out_ctx * out_state);
         ggml_backend_tensor_get(embd_conv, chunk_output.data(), 0, out_ctx * out_state * sizeof(float));
         
-        std::vector<float> chunk_pe(out_ctx * out_state);
-        compute_sinusoidal_pe(chunk_pe.data(), out_ctx, out_state);
-        for (int64_t i = 0; i < out_ctx * out_state; ++i) {
-            chunk_output[i] += chunk_pe[i];
-        }
+        add_positional_embedding(model_, chunk_output, out_ctx, out_state);
         
         all_conv_outputs.insert(all_conv_outputs.end(), chunk_output.begin(), chunk_output.end());
         
@@ -409,6 +447,9 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
     }
     
     int64_t n_ctx = total_output_frames;
+    const int conv_chunk_output = compute_chunk_output_length(chunk_size);
+    const int window_aftercnn = conv_chunk_output * std::max(1, model_.hparams.n_window_infer / chunk_size);
+    std::vector<float> attn_mask = build_window_attention_mask(n_ctx, window_aftercnn);
     
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_ASR_MAX_NODES + ggml_graph_overhead());
     
@@ -431,6 +472,10 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
     struct ggml_tensor * inpL = ggml_new_tensor_2d(enc_ctx, GGML_TYPE_F32, n_state, n_ctx);
     ggml_set_name(inpL, "enc_input");
     ggml_set_input(inpL);
+
+    struct ggml_tensor * mask_t = ggml_new_tensor_2d(enc_ctx, GGML_TYPE_F32, n_ctx, n_ctx);
+    ggml_set_name(mask_t, "attn_mask");
+    ggml_set_input(mask_t);
     
     struct ggml_tensor * cur = inpL;
     
@@ -473,7 +518,7 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
             
             struct ggml_tensor * KQ = ggml_mul_mat(enc_ctx, K, Q);
             
-            struct ggml_tensor * KQ_soft_max = ggml_soft_max_ext(enc_ctx, KQ, nullptr, KQscale, 0.0f);
+            struct ggml_tensor * KQ_soft_max = ggml_soft_max_ext(enc_ctx, KQ, mask_t, KQscale, 0.0f);
             
             struct ggml_tensor * V = ggml_cont(enc_ctx, ggml_permute(enc_ctx,
                 ggml_reshape_3d(enc_ctx, Vcur, n_state_head, n_head, n_ctx),
@@ -569,6 +614,16 @@ bool AudioEncoder::encode(const float * mel_data, int n_mel, int n_frames,
     }
     
     ggml_backend_tensor_set(enc_input, all_conv_outputs.data(), 0, n_ctx * n_state * sizeof(float));
+
+    struct ggml_tensor * mask_input = ggml_graph_get_tensor(gf_enc, "attn_mask");
+    if (!mask_input) {
+        error_msg_ = "Failed to find attn_mask tensor";
+        ggml_backend_sched_reset(state_.sched);
+        ggml_free(enc_ctx);
+        return false;
+    }
+    
+    ggml_backend_tensor_set(mask_input, attn_mask.data(), 0, attn_mask.size() * sizeof(float));
     
     {
         QWEN3_TIMER("audio_encoding.transformer");
@@ -658,11 +713,7 @@ bool AudioEncoder::encode_no_chunk(const float * mel_data, int n_mel, int n_fram
     
     ggml_backend_sched_reset(state_.sched);
     
-    std::vector<float> pos_emb(out_ctx * n_state);
-    compute_sinusoidal_pe(pos_emb.data(), out_ctx, n_state);
-    for (int64_t i = 0; i < out_ctx * n_state; ++i) {
-        conv_output[i] += pos_emb[i];
-    }
+    add_positional_embedding(model_, conv_output, out_ctx, n_state);
     
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_ASR_MAX_NODES + ggml_graph_overhead());
     

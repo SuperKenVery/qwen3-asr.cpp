@@ -76,6 +76,9 @@ struct audio_encoder_model {
     
     // Output projection (conv_out)
     struct ggml_tensor * conv_out_w = nullptr;
+
+    // Learned audio positional embedding, when present in the GGUF.
+    struct ggml_tensor * pos_embd_w = nullptr;
     
     struct ggml_tensor * ln_post_w = nullptr;
     struct ggml_tensor * ln_post_b = nullptr;

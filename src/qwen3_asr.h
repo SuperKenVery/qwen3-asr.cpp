@@ -27,6 +27,10 @@ struct transcribe_params {
     
     // Print timing information
     bool print_timing = true;
+
+    // Split long audio before encoder self-attention to avoid quadratic memory use.
+    // Set <= 0 to disable chunking.
+    float chunk_seconds = 30.0f;
 };
 
 // Transcription result
@@ -84,6 +88,12 @@ private:
     // Internal transcription implementation
     transcribe_result transcribe_internal(const float * samples, int n_samples,
                                            const transcribe_params & params);
+
+    transcribe_result transcribe_chunked(const float * samples, int n_samples,
+                                         const transcribe_params & params);
+
+    transcribe_result transcribe_single(const float * samples, int n_samples,
+                                        const transcribe_params & params);
     
     // Build input token sequence for audio
     std::vector<int32_t> build_input_tokens(int32_t n_audio_frames, 

@@ -141,6 +141,10 @@ bool GGUFLoader::create_tensors(struct gguf_context * ctx, audio_encoder_model &
             ne[0] = model.hparams.conv_channels * 16;
             ne[1] = model.hparams.d_model;
             n_dims = 2;
+        } else if (strstr(name, "encoder.pos_embd.weight")) {
+            ne[0] = model.hparams.d_model;
+            ne[1] = total_elements / model.hparams.d_model;
+            n_dims = 2;
         } else if (strstr(name, "attn_q.weight") || strstr(name, "attn_k.weight") || 
                    strstr(name, "attn_v.weight") || strstr(name, "attn_out.weight")) {
             ne[0] = model.hparams.d_model;
@@ -211,6 +215,8 @@ bool GGUFLoader::create_tensors(struct gguf_context * ctx, audio_encoder_model &
             model.conv2d3_b = tensor;
         } else if (strstr(name, "encoder.conv_out.weight")) {
             model.conv_out_w = tensor;
+        } else if (strstr(name, "encoder.pos_embd.weight")) {
+            model.pos_embd_w = tensor;
         } else if (strstr(name, "encoder.ln_post.weight")) {
             model.ln_post_w = tensor;
         } else if (strstr(name, "encoder.ln_post.bias")) {
